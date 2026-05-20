@@ -1,0 +1,13 @@
+# Copy this file to terraform.tfvars and fill in your values.
+# terraform.tfvars is gitignored — never commit real credentials.
+
+aws_region   = "us-east-1"
+cluster_name = "CojoCloud-EKS-Cluster"
+environment  = "DEV"
+domain_name  = "cojocloudsolutions.com"
+
+# Restrict to your own IP for security: ["x.x.x.x/32"]
+cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"]
+
+# Use a strong password — or pull from AWS Secrets Manager
+grafana_admin_password = "CHANGE_ME"
