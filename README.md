@@ -23,10 +23,10 @@ This project covers the **metrics** pillar end-to-end with Prometheus and Grafan
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         AWS Cloud (us-east-1)                       │
-│                                                                     │
+│                         AWS Cloud (us-east-1)                      │
+│                                                                    │
 │  ┌─────────────────────────────────────────────────────────────┐   │
-│  │                    EKS Cluster (1.32)                        │   │
+│  │                    EKS Cluster (1.32)                       │   │
 │  │                                                             │   │
 │  │  ┌─────────────────┐    ┌─────────────────┐                 │   │
 │  │  │   Prometheus    │◄───┤  Node Exporter  │                 │   │
@@ -48,7 +48,7 @@ This project covers the **metrics** pillar end-to-end with Prometheus and Grafan
 │  │  │  (NLB-backed)   │                                        │   │
 │  │  └─────────────────┘                                        │   │
 │  └─────────────────────────────────────────────────────────────┘   │
-│                                                                     │
+│                                                                    │
 │  S3 (Terraform state) │ VPC │ Private + Public Subnets │ NAT GW    │
 └─────────────────────────────────────────────────────────────────────┘
 ```
