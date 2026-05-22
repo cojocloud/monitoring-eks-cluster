@@ -189,14 +189,6 @@ rate(nginx_ingress_controller_requests[5m])
 | NGINX Ingress Controller | 9614 |
 | ETCD Metrics | 3070 |
 
-![Prometheus targets](/images/prom_1.png)
-
-![Prometheus queries](/images/prom_2.png)
-
-![Grafana cluster dashboard](/images/graf_1.png)
-
-![Grafana node dashboard](/images/graf_2.png)
-
 ---
 
 ## Cleanup
