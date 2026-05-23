@@ -4,12 +4,12 @@ metadata:
   labels:
     app: result
   name: result
+  namespace: vote
 spec:
-  type: NodePort
+  type: ClusterIP
   ports:
   - name: "result-service"
-    port: 8081
+    port: 80
     targetPort: 80
-    nodePort: 31001
   selector:
     app: result

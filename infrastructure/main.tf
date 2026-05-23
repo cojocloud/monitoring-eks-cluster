@@ -58,6 +58,17 @@ module "eks" {
   cluster_endpoint_public_access_cidrs     = var.cluster_endpoint_public_access_cidrs
   enable_cluster_creator_admin_permissions = true
 
+  node_security_group_additional_rules = {
+    ingress_self_all = {
+      description = "Allow all traffic between nodes (required for cross-AZ pod-to-pod communication)"
+      protocol    = "-1"
+      from_port   = 0
+      to_port     = 0
+      type        = "ingress"
+      self        = true
+    }
+  }
+
   # EKS Managed Node Groups
   eks_managed_node_groups = {
     EKS_Node_Group = {
@@ -203,6 +214,69 @@ resource "aws_eks_addon" "s3_mountpoint_csi_driver" {
   }
 }
 */
+####################################################################################
+###  IAM Role for EBS CSI Driver (Pod Identity)
+####################################################################################
+resource "aws_iam_role" "ebs_csi_driver" {
+  name = "${var.cluster_name}-ebs-csi-driver"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "pods.eks.amazonaws.com"
+        }
+        Action = [
+          "sts:AssumeRole",
+          "sts:TagSession"
+        ]
+      }
+    ]
+  })
+
+  tags = {
+    Name        = "${var.cluster_name}-ebs-csi-driver"
+    Environment = var.environment
+    Terraform   = "true"
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "ebs_csi_driver" {
+  role       = aws_iam_role.ebs_csi_driver.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+}
+
+####################################################################################
+###  Pod Identity Association for EBS CSI Driver
+####################################################################################
+resource "aws_eks_pod_identity_association" "ebs_csi_driver" {
+  cluster_name    = module.eks.cluster_name
+  namespace       = "kube-system"
+  service_account = "ebs-csi-controller-sa"
+  role_arn        = aws_iam_role.ebs_csi_driver.arn
+
+  depends_on = [module.eks, aws_iam_role_policy_attachment.ebs_csi_driver]
+}
+
+####################################################################################
+###  EBS CSI Driver Addon (after Pod Identity association is ready)
+####################################################################################
+resource "aws_eks_addon" "ebs_csi_driver" {
+  cluster_name                = module.eks.cluster_name
+  addon_name                  = "aws-ebs-csi-driver"
+  resolve_conflicts_on_create = "OVERWRITE"
+
+  depends_on = [aws_eks_pod_identity_association.ebs_csi_driver]
+
+  tags = {
+    Name        = "${var.cluster_name}-ebs-csi-driver"
+    Environment = var.environment
+    Terraform   = "true"
+  }
+}
+
 ####################################################################################
 ###  Null Resource to update the kubeconfig file
 ####################################################################################

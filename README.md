@@ -2,7 +2,7 @@
 
 A production-ready observability platform deployed on Amazon EKS using Terraform. This project provisions an EKS cluster, installs the full Prometheus + Grafana monitoring stack via Helm, configures Route53 DNS, and deploys a sample microservices application to observe.
 
-Live stack: [prometheus.cojocloudsolutions.com](https://prometheus.cojocloudsolutions.com) | [grafana.cojocloudsolutions.com](https://grafana.cojocloudsolutions.com)
+Live stack: [prometheus.cojocloudsolutions.com](http://prometheus.cojocloudsolutions.com) | [grafana.cojocloudsolutions.com](http://grafana.cojocloudsolutions.com)
 
 ---
 
@@ -126,14 +126,38 @@ Terraform will:
 - Create a VPC with public/private subnets across 2 AZs
 - Provision an EKS 1.32 cluster with managed node groups (`t3.medium`, 2 nodes)
 - Install NGINX Ingress Controller (NLB-backed)
-- Create Route53 A records pointing your domain at the NLB
 - Install the kube-prometheus-stack (Prometheus + Grafana + AlertManager)
 - Configure custom alert rules
 
-### 4. Deploy the sample voting app
+### 4. Point your domain at the NLB
+
+DNS is managed at your domain registrar — Terraform does not create DNS records. After `terraform apply`, get the NLB hostname:
+
+```bash
+kubectl get svc -n ingress-nginx ingress-nginx-controller \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+```
+
+Add four CNAME records at your registrar pointing at that hostname:
+
+| Name | Type | Value |
+|------|------|-------|
+| `prometheus` | CNAME | `<nlb-hostname>` |
+| `grafana` | CNAME | `<nlb-hostname>` |
+| `vote` | CNAME | `<nlb-hostname>` |
+| `result` | CNAME | `<nlb-hostname>` |
+
+Verify DNS propagation:
+```bash
+dig prometheus.yourdomain.com +short
+```
+
+### 5. Deploy the sample voting app
 
 ```bash
 cd example-voting-app/k8s-specifications
+kubectl apply -f .
+# Run twice — the namespace is created on the first pass
 kubectl apply -f .
 ```
 
@@ -143,8 +167,12 @@ kubectl apply -f .
 
 | Service | URL |
 |---|---|
-| Prometheus | https://prometheus.cojocloudsolutions.com |
-| Grafana | https://grafana.cojocloudsolutions.com |
+| Prometheus | http://prometheus.cojocloudsolutions.com |
+| Grafana | http://grafana.cojocloudsolutions.com |
+| Vote app | http://vote.cojocloudsolutions.com |
+| Results app | http://result.cojocloudsolutions.com |
+
+**Grafana login:** username `admin`, password set in `terraform.tfvars`.
 
 Or via port-forward (no DNS required):
 ```bash
@@ -191,17 +219,55 @@ rate(nginx_ingress_controller_requests[5m])
 
 ---
 
+## Outcomes
+
+### Kubernetes API Server — 100% Availability
+![Kubernetes API Server dashboard showing 100% availability and SLI metrics](images/image1.png)
+
+### Cluster Compute Resources — CPU & Memory by Namespace
+![Cluster compute resources dashboard showing 4.55% CPU utilisation and 35.4% memory usage across vote, monitoring, ingress-nginx and kube-system namespaces](images/image2.png)
+
+### Persistent Volumes — Grafana PVC
+![Persistent volumes dashboard showing Grafana PVC with 30.9 MiB used out of 10 GiB (0.310%)](images/image3.png)
+
+### Multi-Cluster Compute Resources Overview
+![Multi-cluster compute resources dashboard showing cluster-wide CPU and memory utilisation](images/image4.png)
+
+### Prometheus — Live PromQL Queries
+![Prometheus query UI showing live PromQL queries for node CPU usage, memory usage, and pod count by namespace](images/image5.png)
+
+---
+
 ## Cleanup
 
 ```bash
-# Remove the voting app
-cd example-voting-app/k8s-specifications
-kubectl delete -f .
+# 1. Remove the voting app
+kubectl delete namespace vote
 
-# Destroy all AWS infrastructure
+# 2. Delete the NLB created by the nginx ingress controller
+#    (Terraform cannot delete it — it was created by Kubernetes)
+NLB_ARN=$(aws elbv2 describe-load-balancers --region us-east-1 \
+  --query "LoadBalancers[0].LoadBalancerArn" --output text)
+aws elbv2 delete-load-balancer --load-balancer-arn $NLB_ARN --region us-east-1
+
+# Wait for the NLB to be fully deleted before continuing
+until [ $(aws elbv2 describe-load-balancers --region us-east-1 \
+  --query "length(LoadBalancers)" --output text) -eq 0 ]; do sleep 10; done
+
+# 3. Destroy all Terraform-managed infrastructure
 cd infrastructure
 terraform destroy
 ```
+
+> **If `terraform destroy` fails on VPC/subnet deletion:** EC2 node instances may still be running. Find and terminate them:
+> ```bash
+> aws ec2 describe-instances --filters "Name=tag:aws:eks:cluster-name,Values=<cluster-name>" \
+>   --query "Reservations[*].Instances[*].InstanceId" --output text
+> aws ec2 terminate-instances --instance-ids <id1> <id2>
+> ```
+> Then re-run `terraform destroy`.
+
+> **Note:** The S3 state bucket and any KMS keys are not destroyed by Terraform. Delete them manually if no longer needed. KMS keys have a minimum 7-day deletion waiting period.
 
 ---
 

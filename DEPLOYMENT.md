@@ -72,27 +72,22 @@ aws s3api put-bucket-encryption \
 
 ---
 
-## Step 3 — Set up your Route53 hosted zone
+## Step 3 — Update the S3 backend bucket name
 
-You need a public hosted zone for `cojocloudsolutions.com` in Route53.
+Open `infrastructure/providers.tf` and change the bucket name to your own S3 bucket (the one you created in Step 2):
 
-If it doesn't exist yet:
-```bash
-aws route53 create-hosted-zone \
-  --name cojocloudsolutions.com \
-  --caller-reference $(date +%s)
+```hcl
+backend "s3" {
+  bucket = "your-terraform-state-bucket"   # ← change this
+  ...
+}
 ```
 
-If it already exists, confirm it:
-```bash
-aws route53 list-hosted-zones-by-name --dns-name cojocloudsolutions.com
-```
-
-Make sure your domain registrar's nameservers point to the Route53 NS records for this zone.
+> The bucket must exist before running `terraform init`. See Step 2 for creation commands.
 
 ---
 
-## Step 4 — Configure your Terraform variables
+## Step 4 — Configure Terraform variables
 
 ```bash
 cd infrastructure
@@ -147,11 +142,12 @@ terraform plan
 ```
 
 Review the resources Terraform will create:
-- 1 VPC with public/private subnets
+- 1 VPC with public/private subnets across 2 AZs
 - 1 EKS cluster (1.32) with a managed node group (2x `t3.medium`)
+- EBS CSI driver addon with IAM role and Pod Identity association
 - NGINX Ingress Controller (NLB-backed)
-- Route53 A records for Prometheus and Grafana
-- kube-prometheus-stack (Prometheus + Grafana + AlertManager)
+- kube-prometheus-stack (Prometheus + Grafana + AlertManager) with EBS-backed Grafana persistence
+- Custom alert rules (PodCrashLooping, NodeNotReady, HighCPU, HighMemory)
 
 ---
 
@@ -215,18 +211,41 @@ kubectl get svc -n ingress-nginx ingress-nginx-controller \
 
 ---
 
-## Step 11 — Access Prometheus and Grafana
+## Step 11 — Configure DNS at your registrar
 
-Once DNS propagates (usually 1–5 minutes after `terraform apply`):
+Terraform does not create DNS records. Get the NLB hostname assigned by AWS:
+
+```bash
+kubectl get svc -n ingress-nginx ingress-nginx-controller \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+```
+
+Log in to your domain registrar and add CNAME records for each subdomain pointing at that hostname:
+
+| Name | Type | Value |
+|---|---|---|
+| `prometheus` | CNAME | `<nlb-hostname>` |
+| `grafana` | CNAME | `<nlb-hostname>` |
+| `vote` | CNAME | `<nlb-hostname>` |
+| `result` | CNAME | `<nlb-hostname>` |
+
+Verify DNS is live:
+```bash
+dig prometheus.yourdomain.com +short
+```
+
+Once DNS propagates (usually 1–5 minutes):
 
 | Service | URL |
 |---|---|
-| Prometheus | https://prometheus.cojocloudsolutions.com |
-| Grafana | https://grafana.cojocloudsolutions.com |
+| Prometheus | http://prometheus.cojocloudsolutions.com |
+| Grafana | http://grafana.cojocloudsolutions.com |
+| Vote app | http://vote.cojocloudsolutions.com |
+| Results app | http://result.cojocloudsolutions.com |
 
-**Grafana login:** username `admin`, password is whatever you set in `terraform.tfvars`.
+**Grafana login:** username `admin`, password set in `terraform.tfvars`.
 
-If DNS hasn't propagated yet, use port-forward:
+If you want to access without DNS, use port-forward:
 
 ```bash
 # Prometheus (opens at http://localhost:9090)
@@ -259,16 +278,18 @@ Set the data source to **Prometheus** when importing each one.
 ```bash
 cd example-voting-app/k8s-specifications
 kubectl apply -f .
+# Run twice — namespace is created on the first pass, remaining resources on the second
+kubectl apply -f .
 ```
 
-Verify the pods are running:
+Verify all pods are running:
 
 ```bash
-kubectl get pods
-kubectl get svc
+kubectl get pods -n vote
+kubectl get ingress -n vote
 ```
 
-The voting app services will appear in Prometheus and on the Grafana dashboards.
+The voting app is accessible at `http://vote.yourdomain.com` and `http://result.yourdomain.com` once the CNAME records from Step 11 are in place. Its pods and traffic will appear automatically in Prometheus and on the Grafana dashboards.
 
 ---
 
@@ -293,30 +314,48 @@ Go to Status → Targets in the Prometheus UI. Click the endpoint to see the err
 The EKS cluster may not be fully ready. Run `terraform apply` again — it will pick up where it left off.
 
 **Can't reach Prometheus/Grafana via domain**
+
+Check that the CNAME records exist at your registrar and point to the correct NLB hostname:
 ```bash
-# Check if the Route53 record was created
-aws route53 list-resource-record-sets \
-  --hosted-zone-id $(aws route53 list-hosted-zones-by-name \
-    --dns-name cojocloudsolutions.com \
-    --query 'HostedZones[0].Id' --output text | cut -d'/' -f3)
+# Get the expected NLB hostname
+kubectl get svc -n ingress-nginx ingress-nginx-controller \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+
+# Check what DNS resolves to
+dig prometheus.yourdomain.com +short
 ```
+If the dig output is empty, the CNAME records have not propagated yet or were not created correctly.
 
 ---
 
 ## Cleanup
 
-Remove the voting app:
 ```bash
-cd example-voting-app/k8s-specifications
-kubectl delete -f .
-```
+# 1. Remove the voting app namespace and all its resources
+kubectl delete namespace vote
 
-Destroy all AWS infrastructure (stops billing):
-```bash
+# 2. Delete the NLB — it was created by Kubernetes, not Terraform, and blocks VPC deletion
+NLB_ARN=$(aws elbv2 describe-load-balancers --region us-east-1 \
+  --query "LoadBalancers[0].LoadBalancerArn" --output text)
+aws elbv2 delete-load-balancer --load-balancer-arn $NLB_ARN --region us-east-1
+
+# Wait for NLB to fully delete before continuing
+until [ $(aws elbv2 describe-load-balancers --region us-east-1 \
+  --query "length(LoadBalancers)" --output text) -eq 0 ]; do sleep 10; done
+
+# 3. Destroy all Terraform-managed infrastructure (~10-15 minutes)
 cd infrastructure
 terraform destroy
 ```
 
-Type `yes` when prompted. This takes approximately 10–15 minutes.
+> **If `terraform destroy` fails on subnet/VPC deletion:** EC2 node instances may still be running after the node group is deleted. Terminate them manually:
+> ```bash
+> aws ec2 describe-instances \
+>   --filters "Name=tag:aws:eks:cluster-name,Values=<your-cluster-name>" \
+>             "Name=instance-state-name,Values=running" \
+>   --query "Reservations[*].Instances[*].InstanceId" --output text
+> aws ec2 terminate-instances --instance-ids <id1> <id2> --region us-east-1
+> ```
+> Wait for termination, then re-run `terraform destroy`.
 
-> The S3 state bucket is not managed by Terraform and will not be deleted by `terraform destroy`. Delete it manually if you no longer need it.
+> **Note:** The S3 state bucket and KMS keys are not managed by Terraform and will not be deleted. Remove them manually if no longer needed. KMS keys have a minimum 7-day deletion waiting period.

@@ -1,40 +1,26 @@
-################################################################################
-# Get Route53 hosted zone for cojocloudsolutions.com
-################################################################################
-data "aws_route53_zone" "main" {
-  name         = var.domain_name
-  private_zone = false
-}
 
 ################################################################################
-# Create Route53 A records for Prometheus and Grafana
+# StorageClass backed by the EBS CSI driver
 ################################################################################
-resource "aws_route53_record" "prometheus" {
-  zone_id = data.aws_route53_zone.main.zone_id
-  name    = "prometheus.${var.domain_name}"
-  type    = "A"
-
-  alias {
-    name                   = data.kubernetes_service.nginx_ingress_controller.status.0.load_balancer.0.ingress.0.hostname
-    zone_id                = "Z26RNL4JYFTOTI" # NLB zone ID for us-east-1
-    evaluate_target_health = true
+resource "kubernetes_storage_class_v1" "gp2_csi" {
+  metadata {
+    name = "gp2-csi"
+    annotations = {
+      "storageclass.kubernetes.io/is-default-class" = "false"
+    }
   }
 
-  depends_on = [helm_release.nginx_ingress]
-}
+  storage_provisioner    = "ebs.csi.aws.com"
+  reclaim_policy         = "Delete"
+  volume_binding_mode    = "WaitForFirstConsumer"
+  allow_volume_expansion = true
 
-resource "aws_route53_record" "grafana" {
-  zone_id = data.aws_route53_zone.main.zone_id
-  name    = "grafana.${var.domain_name}"
-  type    = "A"
-
-  alias {
-    name                   = data.kubernetes_service.nginx_ingress_controller.status.0.load_balancer.0.ingress.0.hostname
-    zone_id                = "Z26RNL4JYFTOTI" # NLB zone ID for us-east-1
-    evaluate_target_health = true
+  parameters = {
+    type      = "gp2"
+    encrypted = "true"
   }
 
-  depends_on = [helm_release.nginx_ingress]
+  depends_on = [module.eks]
 }
 
 ################################################################################
@@ -96,9 +82,9 @@ resource "helm_release" "prometheus" {
           }
         }
         persistence = {
-          enabled      = true
-          storageClass = "gp2"
-          size         = "10Gi"
+          enabled          = true
+          storageClassName = "gp2-csi"
+          size             = "10Gi"
         }
       }
 
@@ -186,5 +172,5 @@ resource "helm_release" "prometheus" {
     })
   ]
 
-  depends_on = [kubernetes_namespace.monitoring, helm_release.nginx_ingress]
+  depends_on = [kubernetes_namespace.monitoring, helm_release.nginx_ingress, kubernetes_storage_class_v1.gp2_csi]
 }

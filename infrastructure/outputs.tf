@@ -61,8 +61,8 @@ output "grafana_service_info" {
 output "monitoring_access_commands" {
   description = "Commands to access monitoring services"
   value = {
-    prometheus_url          = "https://prometheus.${var.domain_name}"
-    grafana_url             = "https://grafana.${var.domain_name}"
+    prometheus_url          = "http://prometheus.${var.domain_name}"
+    grafana_url             = "http://grafana.${var.domain_name}"
     prometheus_port_forward = "kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090"
     grafana_port_forward    = "kubectl port-forward -n monitoring svc/prometheus-grafana 3000:80"
     get_nginx_loadbalancer  = "kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'"
