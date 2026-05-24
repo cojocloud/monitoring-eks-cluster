@@ -86,27 +86,68 @@ This project goes beyond a basic Prometheus/Grafana install:
 
 ## Prerequisites
 
-- AWS CLI configured (`aws configure`)
-- Terraform >= 1.0
-- kubectl
-- Helm >= 3.0
-- A Route53 hosted zone for your domain
-- An S3 bucket for Terraform state (update `providers.tf`)
+| Tool | Min Version |
+|------|-------------|
+| AWS CLI | v2 |
+| Terraform | >= 1.0 |
+| kubectl | >= 1.28 |
+| Helm | >= 3.0 |
+
+AWS credentials must be configured (`aws configure`) and the calling identity needs permissions to create EKS, VPC, IAM, and ELB resources.
+
+---
+
+## Quick Start
+
+```bash
+# Deploy everything end-to-end (~15-20 min)
+./deploy.sh
+
+# Tear everything down when done
+./cleanup.sh
+```
 
 ---
 
 ## Deployment
 
-### 1. Configure your variables
+### Automated (recommended)
 
+```bash
+./deploy.sh
+```
+
+The script handles the full deployment in order:
+
+| Step | Action |
+|------|--------|
+| 1 | Verifies `aws`, `terraform`, `kubectl`, `helm` are installed |
+| 2 | Validates AWS credentials |
+| 3 | Creates the S3 state bucket with versioning and encryption (idempotent) |
+| 4 | Creates `terraform.tfvars` from the example if missing, prompting for your Grafana password and IP CIDR |
+| 5 | Adds and updates Helm repositories |
+| 6 | Runs `terraform init` |
+| 7 | Runs `terraform plan` and pauses for your review before applying |
+| 8 | Runs `terraform apply` (~15–20 min) |
+| 9 | Updates kubeconfig |
+| 10 | Waits for all nodes to reach `Ready` |
+| 11 | Waits for monitoring pods and prints the NLB hostname |
+| 12 | Optionally deploys the example voting app |
+| — | Prints a final summary with URLs, port-forward commands, and DNS CNAME instructions |
+
+### Manual
+
+<details>
+<summary>Click to expand manual steps</summary>
+
+**1. Configure your variables**
 ```bash
 cd infrastructure
 cp terraform.tfvars.example terraform.tfvars
 # Edit terraform.tfvars with your domain, cluster name, and Grafana password
 ```
 
-### 2. Add Helm repositories
-
+**2. Add Helm repositories**
 ```bash
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo add grafana https://grafana.github.io/helm-charts
@@ -114,31 +155,38 @@ helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
 helm repo update
 ```
 
-### 3. Deploy infrastructure
-
+**3. Deploy infrastructure**
 ```bash
+cd infrastructure
 terraform init
 terraform plan
 terraform apply
 ```
 
-Terraform will:
-- Create a VPC with public/private subnets across 2 AZs
-- Provision an EKS 1.32 cluster with managed node groups (`t3.medium`, 2 nodes)
-- Install NGINX Ingress Controller (NLB-backed)
-- Install the kube-prometheus-stack (Prometheus + Grafana + AlertManager)
-- Configure custom alert rules
+**4. Update kubeconfig**
+```bash
+aws eks --region us-east-1 update-kubeconfig --name CojoCloud-EKS-Cluster
+```
 
-### 4. Point your domain at the NLB
+**5. Deploy the sample voting app**
+```bash
+cd example-voting-app/k8s-specifications
+kubectl apply -f .
+kubectl apply -f .   # run twice — namespace is created on the first pass
+```
 
-DNS is managed at your domain registrar — Terraform does not create DNS records. After `terraform apply`, get the NLB hostname:
+</details>
+
+### DNS (manual — required regardless of deployment method)
+
+Terraform does not create DNS records. After apply, get the NLB hostname:
 
 ```bash
 kubectl get svc -n ingress-nginx ingress-nginx-controller \
   -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
 ```
 
-Add four CNAME records at your registrar pointing at that hostname:
+Add CNAME records at your registrar pointing at that hostname:
 
 | Name | Type | Value |
 |------|------|-------|
@@ -146,20 +194,6 @@ Add four CNAME records at your registrar pointing at that hostname:
 | `grafana` | CNAME | `<nlb-hostname>` |
 | `vote` | CNAME | `<nlb-hostname>` |
 | `result` | CNAME | `<nlb-hostname>` |
-
-Verify DNS propagation:
-```bash
-dig prometheus.yourdomain.com +short
-```
-
-### 5. Deploy the sample voting app
-
-```bash
-cd example-voting-app/k8s-specifications
-kubectl apply -f .
-# Run twice — the namespace is created on the first pass
-kubectl apply -f .
-```
 
 ---
 
@@ -240,34 +274,61 @@ rate(nginx_ingress_controller_requests[5m])
 
 ## Cleanup
 
+### Automated (recommended)
+
+```bash
+./cleanup.sh
+```
+
+The script tears down the stack in the correct order:
+
+| Step | Action |
+|------|--------|
+| 1 | Requires explicit confirmation before proceeding |
+| 2 | Refreshes kubeconfig (skips gracefully if cluster is already gone) |
+| 3 | Deletes the `vote` namespace if it exists |
+| 4 | Finds NLBs scoped to the cluster's VPC, deletes them, and waits for full deletion before continuing |
+| 5 | Runs `terraform destroy -auto-approve` |
+| 6 | Detects any leftover EC2 instances tagged with the cluster name and offers to terminate them, then re-runs destroy if needed |
+| — | Prints instructions for manually deleting the S3 state bucket and any KMS keys |
+
+> **Note:** The S3 state bucket and any KMS keys are not managed by Terraform and will not be deleted by the script. Instructions are printed at the end. KMS keys have a minimum 7-day deletion waiting period.
+
+### Manual
+
+<details>
+<summary>Click to expand manual steps</summary>
+
 ```bash
 # 1. Remove the voting app
 kubectl delete namespace vote
 
-# 2. Delete the NLB created by the nginx ingress controller
-#    (Terraform cannot delete it — it was created by Kubernetes)
+# 2. Delete the NLB created by the nginx ingress controller (Kubernetes-managed, not Terraform)
 NLB_ARN=$(aws elbv2 describe-load-balancers --region us-east-1 \
-  --query "LoadBalancers[0].LoadBalancerArn" --output text)
+  --query "LoadBalancers[?VpcId=='<your-vpc-id>' && Type=='network'].LoadBalancerArn" \
+  --output text)
 aws elbv2 delete-load-balancer --load-balancer-arn $NLB_ARN --region us-east-1
 
 # Wait for the NLB to be fully deleted before continuing
 until [ $(aws elbv2 describe-load-balancers --region us-east-1 \
-  --query "length(LoadBalancers)" --output text) -eq 0 ]; do sleep 10; done
+  --query "length(LoadBalancers[?VpcId=='<your-vpc-id>'])" --output text) -eq 0 ]; do sleep 10; done
 
 # 3. Destroy all Terraform-managed infrastructure
 cd infrastructure
 terraform destroy
 ```
 
-> **If `terraform destroy` fails on VPC/subnet deletion:** EC2 node instances may still be running. Find and terminate them:
-> ```bash
-> aws ec2 describe-instances --filters "Name=tag:aws:eks:cluster-name,Values=<cluster-name>" \
->   --query "Reservations[*].Instances[*].InstanceId" --output text
-> aws ec2 terminate-instances --instance-ids <id1> <id2>
-> ```
-> Then re-run `terraform destroy`.
+If `terraform destroy` fails on VPC/subnet deletion, EC2 node instances may still be running:
+```bash
+aws ec2 describe-instances \
+  --filters "Name=tag:aws:eks:cluster-name,Values=CojoCloud-EKS-Cluster" \
+            "Name=instance-state-name,Values=running" \
+  --query "Reservations[*].Instances[*].InstanceId" --output text
+aws ec2 terminate-instances --instance-ids <id1> <id2> --region us-east-1
+```
+Then re-run `terraform destroy`.
 
-> **Note:** The S3 state bucket and any KMS keys are not destroyed by Terraform. Delete them manually if no longer needed. KMS keys have a minimum 7-day deletion waiting period.
+</details>
 
 ---
 
