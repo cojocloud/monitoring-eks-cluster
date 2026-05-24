@@ -1,6 +1,6 @@
 # EKS Observability Stack: Prometheus & Grafana with Terraform and Helm
 
-A production-ready observability platform deployed on Amazon EKS using Terraform. This project provisions an EKS cluster, installs the full Prometheus + Grafana monitoring stack via Helm, configures Route53 DNS, and deploys a sample microservices application to observe.
+This project deploys a production-ready observability stack on Amazon EKS using Terraform and Helm. It provisions an EKS cluster inside a custom VPC, then installs Prometheus, Grafana, AlertManager, and NGINX Ingress — all wired together and exposed via Route53 DNS-backed subdomains. Out of the box you get 30-day metric retention, Grafana dashboards backed by a persistent EBS volume (so nothing is lost on pod restarts), pre-configured AlertManager rules for common failure conditions like pod crash-looping and high CPU, and NGINX ingress metrics flowing automatically into Prometheus. A sample microservices voting app is included as a live observability target. The entire lifecycle — from cluster creation to teardown — is handled by scripted `deploy.sh` and `cleanup.sh` helpers that manage Helm repos, Terraform state in S3, NLB cleanup ordering, and kubeconfig updates, reducing a 15-step manual process to a single command.
 
 Live stack: [prometheus.cojocloudsolutions.com](http://prometheus.cojocloudsolutions.com) | [grafana.cojocloudsolutions.com](http://grafana.cojocloudsolutions.com)
 
